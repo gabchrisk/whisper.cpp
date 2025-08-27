@@ -29,7 +29,7 @@ RUN cmake --build build --config Release
 
 # Verify the binary was built
 RUN ls -la /app/whisper.cpp/build/bin/
-RUN file /app/whisper.cpp/build/bin/main
+RUN file /app/whisper.cpp/build/bin/whisper-cli
 
 # Move back to the app directory
 WORKDIR /app
@@ -44,16 +44,16 @@ RUN mkdir -p /app/models
 # Download the model with proper error handling
 RUN cd /app/whisper.cpp && \
     chmod +x models/download-ggml-model.sh && \
-    ./models/download-ggml-model.sh small && \
-    cp models/ggml-small.bin /app/models/ && \
+    ./models/download-ggml-model.sh base && \
+    cp models/ggml-base.bin /app/models/ && \
     ls -la /app/models/
 
 # Copy the application file
 COPY main.py .
 
 # Verify all required files exist
-RUN ls -la /app/whisper.cpp/build/bin/main
-RUN ls -la /app/models/ggml-small.bin
+RUN ls -la /app/whisper.cpp/build/bin/whisper-cli
+RUN ls -la /app/models/ggml-base.bin
 
 # Create a health check script
 RUN echo '#!/bin/bash\ncurl -f http://localhost:8000/health || exit 1' > /app/healthcheck.sh
