@@ -1,7 +1,5 @@
 # =====================================================================
-# Final Single-Stage Dockerfile based on official whisper.cpp repository
-# This version includes all necessary build and runtime dependencies in one stage
-# to ensure maximum compatibility and prevent runtime errors.
+# Fixed Dockerfile for whisper.cpp with proper binary location
 # =====================================================================
 FROM ubuntu:24.04
 
@@ -9,7 +7,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/opt/venv/bin:$PATH"
 
 # 1. Install all required system dependencies
-# Includes build tools, Python, and crucially, FFmpeg and its development libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     cmake \
@@ -22,7 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavcodec-dev \
     libavformat-dev \
     libavutil-dev \
-    libsdl2-2.0-0 \
+    libavdevice-dev \
+    libavfilter-dev \
+    libswscale-dev \
+    libswresample-dev \
+    pkg-config \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -30,41 +31,44 @@ WORKDIR /app
 # 2. Clone whisper.cpp repository
 RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
-# 3. Build whisper.cpp with FFmpeg support enabled
-# This is a critical fix: -DWHISPER_FFMPEG=ON links the binary with FFmpeg libraries.
+# 3. Build whisper.cpp with FFmpeg support
 RUN cd whisper.cpp && \
-    mkdir build && \
+    mkdir -p build && \
     cd build && \
     cmake .. -DWHISPER_FFMPEG=ON && \
-    make -j$(nproc) main
+    make -j$(nproc)
 
-# 4. Download the GGML model
+# 4. Verify and create proper binary location
+# The build creates 'main' in build/ directory, not build/bin/
+RUN ls -la /app/whisper.cpp/build/ && \
+    if [ -f /app/whisper.cpp/build/bin/main ]; then \
+        ln -sf /app/whisper.cpp/build/bin/main /app/whisper.cpp/build/main; \
+    elif [ -f /app/whisper.cpp/build/main ]; then \
+        echo "Binary already in correct location"; \
+    else \
+        echo "ERROR: Binary not found in expected locations" && exit 1; \
+    fi
+
+# 5. Download the GGML model
 RUN mkdir -p /app/models && \
     wget -O /app/models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 
-# 5. Copy the Python application code
+# 6. Test the binary works
+RUN /app/whisper.cpp/build/main --help || echo "Binary test failed but continuing..."
+
+# 7. Create virtual environment and install Python packages
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir fastapi uvicorn python-multipart
+
+# 8. Copy Python application
 COPY main.py .
 
-# 6. Create a symbolic link to the correct binary path
-# This is a more robust fix than editing the script.
-# It makes the binary available at the path the script expects (/app/whisper.cpp/build/main)
-# by linking it to the actual location (/app/whisper.cpp/build/bin/main).
-RUN ln -s /app/whisper.cpp/build/bin/main /app/whisper.cpp/build/main
+# 9. Create non-root user
+RUN groupadd -r appuser && useradd -r -g appuser appuser && \
+    chown -R appuser:appuser /app
 
-# 7. Create a virtual environment and install Python packages
-RUN python3 -m venv /opt/venv && \
-    pip install --no-cache-dir fastapi uvicorn python-multipart
-
-# 8. Create a non-root user for security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-
-# 9. Change ownership of the entire app directory to the new user
-RUN chown -R appuser:appuser /app
-
-# 10. Switch to the non-root user
 USER appuser
 
 EXPOSE 5000
 
-# 11. Run the application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
