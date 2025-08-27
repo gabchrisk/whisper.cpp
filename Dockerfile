@@ -1,13 +1,15 @@
 # =====================================================================
-# Final Single-Stage Dockerfile
-# This version builds everything in one consistent environment to maximize compatibility.
+# Final Single-Stage Dockerfile based on official whisper.cpp repository
+# This version includes all necessary build and runtime dependencies in one stage
+# to ensure maximum compatibility and prevent runtime errors.
 # =====================================================================
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/opt/venv/bin:$PATH"
 
-# 1. Install all build-time and run-time dependencies in one go.
+# 1. Install all required system dependencies
+# Includes build tools, Python, and crucially, FFmpeg and SDL2 libraries for audio processing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     cmake \
@@ -17,6 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     ffmpeg \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libsdl2-2.0-0 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -24,38 +30,35 @@ WORKDIR /app
 # 2. Clone whisper.cpp repository
 RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
-# 3. Build whisper.cpp
+# 3. Build whisper.cpp with FFmpeg support enabled
+# This ensures the binary can handle various audio formats like .m4a
 RUN cd whisper.cpp && \
     mkdir build && \
     cd build && \
-    cmake .. && \
+    cmake .. -DWHISPER_FFMPEG=ON && \
     make -j$(nproc)
 
 # 4. Download the GGML model
 RUN mkdir -p /app/models && \
     wget -O /app/models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 
-# 5. Copy the Python application code
-COPY main.py .
-
-# 6. IMPORTANT FIX: Update the binary path directly in the script
-# This avoids any potential issues with symbolic links.
-RUN sed -i 's|"/app/whisper.cpp/build/main"|"/app/whisper.cpp/build/bin/main"|g' main.py
-
-# 7. Create a non-root user for security
+# 5. Create a non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# 8. Create a virtual environment and install Python packages
+# 6. Copy the Python application code
+COPY --chown=appuser:appuser main.py .
+
+# 7. Create a virtual environment and install Python packages
 RUN python3 -m venv /opt/venv && \
     pip install --no-cache-dir fastapi uvicorn python-multipart
 
-# 9. Change ownership of the entire app directory
+# 8. Change ownership of the entire app directory to the new user
 RUN chown -R appuser:appuser /app
 
-# 10. Switch to the non-root user
+# 9. Switch to the non-root user
 USER appuser
 
 EXPOSE 5000
 
-# 11. Run the application
+# 10. Run the application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
