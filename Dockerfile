@@ -17,7 +17,7 @@ RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
 # Build the main binary
 WORKDIR /app/whisper.cpp
-RUN make main
+RUN make
 
 
 # Stage 2: Final production image
