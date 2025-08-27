@@ -18,7 +18,7 @@ async def root():
 @app.get("/health")
 async def health_check():
     # Verify binary and model exist
-    whisper_binary = "/app/whisper.cpp/build/main"
+    whisper_binary = "/app/whisper.cpp/build/whisper-cli"
     model_path = "/app/models/ggml-small.bin"
     
     binary_exists = os.path.exists(whisper_binary)
@@ -57,7 +57,7 @@ async def transcribe(file: UploadFile = File(...)):
 
     try:
         # Verify paths
-        whisper_binary = "/app/whisper.cpp/build/main"
+        whisper_binary = "/app/whisper.cpp/build/whisper-cli"
         model_path = "/app/models/ggml-small.bin"
         
         if not os.path.exists(whisper_binary):
@@ -82,12 +82,17 @@ async def transcribe(file: UploadFile = File(...)):
         
         logger.info(f"Executing command: {' '.join(cmd)}")
         
-        # Execute whisper.cpp
+        # Execute whisper.cpp with extended timeout for long recordings
+        # Scale timeout: minimum 5 minutes, up to 2 hours for very large files
+        file_size_mb = os.path.getsize(temp_file_path) / (1024 * 1024)
+        timeout_seconds = min(7200, max(300, int(file_size_mb * 60)))  # ~1 minute per MB
+        logger.info(f"File size: {file_size_mb:.1f}MB, estimated timeout: {timeout_seconds}s ({timeout_seconds//60}min)")
+        
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=timeout_seconds
         )
         
         logger.info(f"Whisper exit code: {result.returncode}")
