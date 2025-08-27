@@ -36,6 +36,11 @@ FROM python:3.12-slim-bookworm
 # Mencegah prompt interaktif
 ENV DEBIAN_FRONTEND=noninteractive
 
+# PERBAIKAN: Install wget karena tidak ada di base image 'slim'
+RUN apt-get update && apt-get install -y --no-install-recommends wget && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 # 1. Menetapkan direktori kerja utama
 WORKDIR /app
 
@@ -54,12 +59,10 @@ COPY --chown=appuser:appuser main.py .
 RUN pip install --no-cache-dir fastapi uvicorn python-multipart
 
 # 5. Salin artefak yang dibutuhkan dari stage 'builder'
-# PERBAIKAN: Path yang benar adalah /app/whisper.cpp/build/bin/main
 COPY --from=builder /app/whisper.cpp/build/bin/main /usr/local/bin/whisper
 
-# 6. Download model dan salin kode aplikasi
-RUN mkdir -p /app/models && \
-    chown -R appuser:appuser /app
+# 6. Download model
+RUN mkdir -p /app/models
 RUN wget -O /app/models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 
 # 7. Ganti path binary di main.py agar sesuai dengan path baru
@@ -76,3 +79,4 @@ EXPOSE 5000
 
 # 11. Perintah untuk menjalankan aplikasi
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
+```
