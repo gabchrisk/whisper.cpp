@@ -7,7 +7,8 @@ RUN apt-get update && \
         build-essential \
         git \
         wget \
-        ca-certificates && \
+        ca-certificates \
+        cmake && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
