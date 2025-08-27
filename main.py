@@ -10,8 +10,8 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Define paths for the model and binary
-MODEL_PATH = "/app/models/ggml-small.bin"
-WHISPER_BINARY_PATH = "/app/whisper.cpp/build/bin/main"
+MODEL_PATH = "/app/models/ggml-base.bin"
+WHISPER_BINARY_PATH = "/app/whisper.cpp/build/bin/whisper-cli"
 
 app = FastAPI(
     title="Whisper.cpp API",
