@@ -1,71 +1,175 @@
-FROM ubuntu:24.04
+from fastapi import FastAPI, UploadFile, File, HTTPException
+import subprocess
+import os
+import tempfile
+import json
+import logging
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PATH="/opt/venv/bin:$PATH"
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# 1. Install all required system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    cmake \
-    build-essential \
-    wget \
-    python3 \
-    python3-pip \
-    python3-venv \
-    ffmpeg \
-    libavcodec-dev \
-    libavformat-dev \
-    libavutil-dev \
-    libavdevice-dev \
-    libavfilter-dev \
-    libswscale-dev \
-    libswresample-dev \
-    pkg-config \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+app = FastAPI(title="Whisper.cpp API", version="1.0.0")
 
-WORKDIR /app
+@app.get("/")
+async def root():
+    return {"message": "Whisper.cpp API is running", "endpoints": ["/transcribe"]}
 
-# 2. Clone whisper.cpp repository
-RUN git clone https://github.com/ggerganov/whisper.cpp.git
+@app.get("/health")
+async def health_check():
+    # Verify binary and model exist
+    whisper_binary = "/app/whisper.cpp/build/main"
+    model_path = "/app/models/ggml-small.bin"
+    
+    binary_exists = os.path.exists(whisper_binary)
+    model_exists = os.path.exists(model_path)
+    
+    return {
+        "status": "healthy" if binary_exists and model_exists else "unhealthy",
+        "model": "ggml-small.bin",
+        "binary_exists": binary_exists,
+        "model_exists": model_exists,
+        "binary_path": whisper_binary,
+        "model_path": model_path
+    }
 
-# 3. Build whisper.cpp with FFmpeg support
-RUN cd whisper.cpp && \
-    mkdir -p build && \
-    cd build && \
-    cmake .. -DWHISPER_FFMPEG=ON && \
-    make -j$(nproc)
+@app.post("/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    # Validate file type
+    allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.avi', '.mov']
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"File type {file_ext} not supported. Allowed: {', '.join(allowed_extensions)}"
+        )
+    
+    # Create temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+        temp_file_path = temp_file.name
+        content = await file.read()
+        temp_file.write(content)
+    
+    json_file_path = temp_file_path + ".json"
+    
+    logger.info(f"Processing file: {file.filename}, temp path: {temp_file_path}")
 
-# 4. Verify and create proper binary location
-# The build creates 'main' in build/ directory, not build/bin/
-RUN ls -la /app/whisper.cpp/build/ && \
-    if [ -f /app/whisper.cpp/build/bin/main ]; then \
-        ln -sf /app/whisper.cpp/build/bin/main /app/whisper.cpp/build/main; \
-    elif [ -f /app/whisper.cpp/build/main ]; then \
-        echo "Binary already in correct location"; \
-    else \
-        echo "ERROR: Binary not found in expected locations" && exit 1; \
-    fi
+    try:
+        # Verify paths
+        whisper_binary = "/app/whisper.cpp/build/main"
+        model_path = "/app/models/ggml-small.bin"
+        
+        if not os.path.exists(whisper_binary):
+            raise HTTPException(status_code=500, detail=f"Whisper binary not found at {whisper_binary}")
+        if not os.path.exists(model_path):
+            raise HTTPException(status_code=500, detail=f"Whisper model not found at {model_path}")
+        
+        # Check if binary is executable
+        if not os.access(whisper_binary, os.X_OK):
+            raise HTTPException(status_code=500, detail=f"Whisper binary is not executable: {whisper_binary}")
+        
+        # Build command
+        cmd = [
+            whisper_binary,
+            "-f", temp_file_path,
+            "-m", model_path,
+            "-oj",  # Output JSON to file
+            "-t", "4",  # Threads
+            "--language", "auto",  # Auto-detect language
+            "-v"  # Verbose output for debugging
+        ]
+        
+        logger.info(f"Executing command: {' '.join(cmd)}")
+        
+        # Execute whisper.cpp
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+        
+        logger.info(f"Whisper exit code: {result.returncode}")
+        logger.info(f"Whisper stdout: {result.stdout}")
+        if result.stderr:
+            logger.warning(f"Whisper stderr: {result.stderr}")
+        
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Whisper processing failed (exit code {result.returncode}): {result.stderr}"
+            )
+        
+        # Check for JSON output file
+        if not os.path.exists(json_file_path):
+            # Try alternative JSON file locations
+            alt_json_paths = [
+                temp_file_path.rsplit('.', 1)[0] + '.json',  # Without original extension
+                os.path.join(os.path.dirname(temp_file_path), 
+                           os.path.basename(temp_file_path).rsplit('.', 1)[0] + '.json')
+            ]
+            
+            json_found = False
+            for alt_path in alt_json_paths:
+                if os.path.exists(alt_path):
+                    json_file_path = alt_path
+                    json_found = True
+                    logger.info(f"Found JSON output at alternative path: {alt_path}")
+                    break
+            
+            if not json_found:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"JSON output file not found. Expected: {json_file_path}. Available files: {os.listdir(os.path.dirname(temp_file_path))}"
+                )
 
-# 5. Download the GGML model
-RUN mkdir -p /app/models && \
-    wget -O /app/models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+        # Read and parse JSON output
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            json_output = json.load(f)
+        
+        logger.info(f"Successfully parsed JSON output with {len(json_output.get('transcription', []))} segments")
+        
+        # Extract text from segments
+        full_text = " ".join([
+            segment.get("text", "") for segment in json_output.get("transcription", [])
+        ]).strip()
 
-# 6. Test the binary works
-RUN /app/whisper.cpp/build/main --help || echo "Binary test failed but continuing..."
+        # Extract detected language
+        detected_language = "unknown"
+        if isinstance(json_output.get("language"), dict):
+            detected_language = json_output["language"].get("language", "unknown")
+        elif isinstance(json_output.get("language"), str):
+            detected_language = json_output["language"]
 
-# 7. Create virtual environment and install Python packages
-RUN python3 -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir fastapi uvicorn python-multipart
+        return {
+            "success": True,
+            "transcription": json_output.get("transcription", []),
+            "text": full_text,
+            "language": detected_language,
+            "model": "ggml-small.bin",
+            "filename": file.filename
+        }
 
-# 8. Copy Python application
-COPY main.py .
+    except subprocess.TimeoutExpired:
+        logger.error("Transcription process timed out")
+        raise HTTPException(status_code=408, detail="Transcription process timed out after 5 minutes.")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse JSON output: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+    finally:
+        # Cleanup temporary files
+        for file_path in [temp_file_path, json_file_path]:
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    logger.info(f"Cleaned up temporary file: {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup {file_path}: {e}")
 
-# 9. Create non-root user
-RUN groupadd -r appuser && useradd -r -g appuser appuser && \
-    chown -R appuser:appuser /app
-
-USER appuser
-
-EXPOSE 5000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000)
