@@ -19,7 +19,7 @@ RUN git clone https://github.com/ggerganov/whisper.cpp.git
 WORKDIR /app/whisper.cpp
 
 # Build using cmake
-RUN cmake -B build
+RUN cmake -B build -DWHISPER_CUDA=OFF -DCMAKE_CUDA_ARCHITECTURES=OFF
 RUN cmake --build build --config Release
 
 
