@@ -1,7 +1,7 @@
 # Stage 1: Build the whisper.cpp binary
 FROM debian:bullseye-slim AS builder
 
-# Install build dependencies, including cmake and ca-certificates
+# Install build dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
@@ -16,10 +16,10 @@ WORKDIR /app
 # Clone whisper.cpp repository
 RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
-# Build the main binary
 WORKDIR /app/whisper.cpp
-RUN make
 
+RUN cmake -B build
+RUN cmake --build build --config Release
 
 # Stage 2: Final production image
 FROM python:3.9-slim-bullseye
@@ -41,7 +41,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY --from=builder /app/whisper.cpp/build/main /usr/local/bin/whisper
+COPY --from=builder /app/whisper.cpp/build/bin/main /usr/local/bin/whisper
 
 # Copy the model downloader script and run it
 # This keeps the model separate from the main application code
