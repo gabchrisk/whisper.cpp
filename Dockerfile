@@ -1,69 +1,53 @@
-# =====================================================================
-# Stage 1: Build whisper.cpp executable
-# =====================================================================
-FROM ubuntu:24.04 AS builder
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    cmake \
-    build-essential \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Clone and build whisper.cpp
-RUN git clone https://github.com/ggerganov/whisper.cpp.git && \
-    cd whisper.cpp && \
-    mkdir build && \
-    cd build && \
-    cmake .. && \
-    make -j$(nproc)
-
-# =====================================================================
-# Stage 2: Final production image
-# =====================================================================
-# Use the same base image as the builder to ensure runtime compatibility
+# Single-stage Dockerfile that keeps all build tools in the final image.
+# This results in a larger image but makes debugging inside the container easier.
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-# Set PATH to include venv binaries
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install runtime dependencies (Python, wget, and ffmpeg for audio processing)
+# Install all build-time and run-time dependencies in one go.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    cmake \
+    build-essential \
+    wget \
     python3 \
     python3-pip \
     python3-venv \
-    wget \
     ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Create a non-root user for better security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+# Clone whisper.cpp repository
+RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
-# Create a virtual environment
-RUN python3 -m venv /opt/venv
+# Build whisper.cpp
+RUN cd whisper.cpp && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make -j$(nproc)
 
-# Copy application and install python packages
-COPY --chown=appuser:appuser main.py .
-RUN pip install --no-cache-dir fastapi uvicorn python-multipart
+# FIX: Create a symbolic link from the actual binary location to the path expected by main.py
+# This is more robust than using 'sed'.
+RUN ln -s /app/whisper.cpp/build/bin/main /app/whisper.cpp/build/main
 
-# Copy build artifacts from the builder stage
-COPY --from=builder /app/whisper.cpp/build/bin/main /usr/local/bin/whisper
-
-# Download model
+# Download the GGML model
 RUN mkdir -p /app/models && \
     wget -O /app/models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 
-# Update the binary path in the script to the new location
-RUN sed -i 's|"/app/whisper.cpp/build/main"|"/usr/local/bin/whisper"|g' main.py
+# Create a non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# Change ownership of app files to the non-root user
+# Copy the Python application code
+COPY --chown=appuser:appuser main.py .
+
+# Create a virtual environment and install Python packages
+RUN python3 -m venv /opt/venv && \
+    pip install --no-cache-dir fastapi uvicorn python-multipart
+
+# Change ownership of the entire app directory and the venv
 RUN chown -R appuser:appuser /app /opt/venv
 
 # Switch to the non-root user
