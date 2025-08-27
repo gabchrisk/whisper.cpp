@@ -1,110 +1,71 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-import subprocess
-import os
-import tempfile
-import json
+FROM ubuntu:24.04
 
-app = FastAPI(title="Whisper.cpp API", version="1.0.0")
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/venv/bin:$PATH"
 
-@app.get("/")
-async def root():
-    return {"message": "Whisper.cpp API is running", "endpoints": ["/transcribe"]}
+# 1. Install all required system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    cmake \
+    build-essential \
+    wget \
+    python3 \
+    python3-pip \
+    python3-venv \
+    ffmpeg \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libavdevice-dev \
+    libavfilter-dev \
+    libswscale-dev \
+    libswresample-dev \
+    pkg-config \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "model": "ggml-small.bin"}
+WORKDIR /app
 
-@app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
-    # Validasi tipe file
-    allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.avi', '.mov']
-    file_ext = os.path.splitext(file.filename)[1].lower()
-    
-    if file_ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"File type {file_ext} not supported. Allowed: {', '.join(allowed_extensions)}"
-        )
-    
-    # Membuat file temporer dengan suffix yang sesuai
-    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-        temp_file_path = temp_file.name
-        content = await file.read()
-        temp_file.write(content)
-    
-    json_file_path = temp_file_path + ".json"
+# 2. Clone whisper.cpp repository
+RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
-    try:
-        # Path absolut ke binary dan model di dalam kontainer
-        whisper_binary = "/app/whisper.cpp/build/main"
-        model_path = "/app/models/ggml-small.bin"
-        
-        # Cek keberadaan file sebelum eksekusi
-        if not os.path.exists(whisper_binary):
-            raise HTTPException(status_code=500, detail="Whisper binary not found at " + whisper_binary)
-        if not os.path.exists(model_path):
-            raise HTTPException(status_code=500, detail="Whisper model not found at " + model_path)
-        
-        # Perintah untuk menjalankan whisper.cpp
-        cmd = [
-            whisper_binary,
-            "-f", temp_file_path,
-            "-m", model_path,
-            "-oj",  # Output format JSON (ke file)
-            "-t", "4",  # Jumlah threads
-            "--language", "auto"  # Deteksi bahasa otomatis
-        ]
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300  # Timeout 5 menit
-        )
-        
-        if result.returncode != 0:
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Whisper processing failed: {result.stderr}"
-            )
-        
-        # Dengan flag -oj, output ada di file JSON, bukan stdout.
-        # Cek apakah file JSON output benar-benar dibuat.
-        if not os.path.exists(json_file_path):
-            raise HTTPException(
-                status_code=500,
-                detail=f"Whisper process succeeded but output JSON file not found. Stderr: {result.stderr}"
-            )
+# 3. Build whisper.cpp with FFmpeg support
+RUN cd whisper.cpp && \
+    mkdir -p build && \
+    cd build && \
+    cmake .. -DWHISPER_FFMPEG=ON && \
+    make -j$(nproc)
 
-        # Baca dan parse file JSON
-        with open(json_file_path, 'r', encoding='utf-8') as f:
-            json_output = json.load(f)
-        
-        # Gabungkan semua segmen teks menjadi satu string
-        full_text = " ".join([
-            segment.get("text", "") for segment in json_output.get("transcription", [])
-        ]).strip()
+# 4. Verify and create proper binary location
+# The build creates 'main' in build/ directory, not build/bin/
+RUN ls -la /app/whisper.cpp/build/ && \
+    if [ -f /app/whisper.cpp/build/bin/main ]; then \
+        ln -sf /app/whisper.cpp/build/bin/main /app/whisper.cpp/build/main; \
+    elif [ -f /app/whisper.cpp/build/main ]; then \
+        echo "Binary already in correct location"; \
+    else \
+        echo "ERROR: Binary not found in expected locations" && exit 1; \
+    fi
 
-        # Ekstrak bahasa yang terdeteksi dengan lebih aman
-        detected_language = json_output.get("language", {}).get("language", "unknown")
+# 5. Download the GGML model
+RUN mkdir -p /app/models && \
+    wget -O /app/models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 
-        return {
-            "success": True,
-            "transcription": json_output.get("transcription", []),
-            "text": full_text,
-            "language": detected_language,
-            "model": "ggml-small.bin",
-            "filename": file.filename
-        }
+# 6. Test the binary works
+RUN /app/whisper.cpp/build/main --help || echo "Binary test failed but continuing..."
 
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=408, detail="Transcription process timed out after 5 minutes.")
-    except Exception as e:
-        # Tangkap semua error lain dan berikan detail
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
-    finally:
-        # Selalu pastikan file temporer dihapus
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-        if os.path.exists(json_file_path):
-            os.remove(json_file_path)
+# 7. Create virtual environment and install Python packages
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir fastapi uvicorn python-multipart
+
+# 8. Copy Python application
+COPY main.py .
+
+# 9. Create non-root user
+RUN groupadd -r appuser && useradd -r -g appuser appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
+EXPOSE 5000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
