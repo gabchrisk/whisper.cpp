@@ -1,11 +1,13 @@
-# Single-stage Dockerfile that keeps all build tools in the final image.
-# This results in a larger image but makes debugging inside the container easier.
+# =====================================================================
+# Final Single-Stage Dockerfile
+# This version builds everything in one consistent environment to maximize compatibility.
+# =====================================================================
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install all build-time and run-time dependencies in one go.
+# 1. Install all build-time and run-time dependencies in one go.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     cmake \
@@ -19,41 +21,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Clone whisper.cpp repository
+# 2. Clone whisper.cpp repository
 RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
-# Build whisper.cpp
+# 3. Build whisper.cpp
 RUN cd whisper.cpp && \
     mkdir build && \
     cd build && \
     cmake .. && \
     make -j$(nproc)
 
-# FIX: Create a symbolic link from the actual binary location to the path expected by main.py
-# This is more robust than using 'sed'.
-RUN ln -s /app/whisper.cpp/build/bin/main /app/whisper.cpp/build/main
-
-# Download the GGML model
+# 4. Download the GGML model
 RUN mkdir -p /app/models && \
     wget -O /app/models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 
-# Create a non-root user for security
+# 5. Copy the Python application code
+COPY main.py .
+
+# 6. IMPORTANT FIX: Update the binary path directly in the script
+# This avoids any potential issues with symbolic links.
+RUN sed -i 's|"/app/whisper.cpp/build/main"|"/app/whisper.cpp/build/bin/main"|g' main.py
+
+# 7. Create a non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# Copy the Python application code
-COPY --chown=appuser:appuser main.py .
-
-# Create a virtual environment and install Python packages
+# 8. Create a virtual environment and install Python packages
 RUN python3 -m venv /opt/venv && \
     pip install --no-cache-dir fastapi uvicorn python-multipart
 
-# Change ownership of the entire app directory and the venv
-RUN chown -R appuser:appuser /app /opt/venv
+# 9. Change ownership of the entire app directory
+RUN chown -R appuser:appuser /app
 
-# Switch to the non-root user
+# 10. Switch to the non-root user
 USER appuser
 
 EXPOSE 5000
 
-# Run the application
+# 11. Run the application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
