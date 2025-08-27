@@ -1,5 +1,4 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
 import subprocess
 import os
 import tempfile
@@ -17,7 +16,7 @@ async def health_check():
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
-    # Validate file type
+    # Validasi tipe file
     allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.avi', '.mov']
     file_ext = os.path.splitext(file.filename)[1].lower()
     
@@ -27,38 +26,40 @@ async def transcribe(file: UploadFile = File(...)):
             detail=f"File type {file_ext} not supported. Allowed: {', '.join(allowed_extensions)}"
         )
     
-    # Create temporary file
+    # Membuat file temporer dengan suffix yang sesuai
     with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
         temp_file_path = temp_file.name
         content = await file.read()
         temp_file.write(content)
     
+    json_file_path = temp_file_path + ".json"
+
     try:
-        # Path ke whisper.cpp binary
+        # Path absolut ke binary dan model di dalam kontainer
         whisper_binary = "/app/whisper.cpp/build/main"
         model_path = "/app/models/ggml-small.bin"
         
-        # Check if files exist
+        # Cek keberadaan file sebelum eksekusi
         if not os.path.exists(whisper_binary):
-            raise HTTPException(status_code=500, detail="Whisper binary not found")
+            raise HTTPException(status_code=500, detail="Whisper binary not found at " + whisper_binary)
         if not os.path.exists(model_path):
-            raise HTTPException(status_code=500, detail="Whisper model not found")
+            raise HTTPException(status_code=500, detail="Whisper model not found at " + model_path)
         
-        # Run whisper.cpp
+        # Perintah untuk menjalankan whisper.cpp
         cmd = [
             whisper_binary,
             "-f", temp_file_path,
             "-m", model_path,
-            "-oj",  # Output JSON format
-            "-t", "4",  # Use 4 threads
-            "--language", "auto"  # Auto detect language
+            "-oj",  # Output format JSON (ke file)
+            "-t", "4",  # Jumlah threads
+            "--language", "auto"  # Deteksi bahasa otomatis
         ]
         
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=300  # Timeout 5 menit
         )
         
         if result.returncode != 0:
@@ -67,49 +68,43 @@ async def transcribe(file: UploadFile = File(...)):
                 detail=f"Whisper processing failed: {result.stderr}"
             )
         
-        # Parse output - whisper.cpp outputs to stdout
-        transcription_text = result.stdout.strip()
+        # Dengan flag -oj, output ada di file JSON, bukan stdout.
+        # Cek apakah file JSON output benar-benar dibuat.
+        if not os.path.exists(json_file_path):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Whisper process succeeded but output JSON file not found. Stderr: {result.stderr}"
+            )
+
+        # Baca dan parse file JSON
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            json_output = json.load(f)
         
-        # Try to parse as JSON if possible, otherwise return as plain text
-        try:
-            # Look for JSON output file (whisper.cpp creates .json file)
-            json_file = temp_file_path + ".json"
-            if os.path.exists(json_file):
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    json_output = json.load(f)
-                os.remove(json_file)  # Clean up
-                
-                return {
-                    "success": True,
-                    "transcription": json_output.get("transcription", []),
-                    "text": " ".join([segment.get("text", "") for segment in json_output.get("transcription", [])]).strip(),
-                    "language": json_output.get("language", "auto"),
-                    "model": "ggml-small.bin",
-                    "filename": file.filename
-                }
-            else:
-                # Fallback to stdout
-                return {
-                    "success": True,
-                    "text": transcription_text,
-                    "model": "ggml-small.bin",
-                    "filename": file.filename
-                }
-                
-        except Exception as e:
-            # If JSON parsing fails, return plain text
-            return {
-                "success": True,
-                "text": transcription_text,
-                "model": "ggml-small.bin",
-                "filename": file.filename
-            }
-    
+        # Gabungkan semua segmen teks menjadi satu string
+        full_text = " ".join([
+            segment.get("text", "") for segment in json_output.get("transcription", [])
+        ]).strip()
+
+        # Ekstrak bahasa yang terdeteksi dengan lebih aman
+        detected_language = json_output.get("language", {}).get("language", "unknown")
+
+        return {
+            "success": True,
+            "transcription": json_output.get("transcription", []),
+            "text": full_text,
+            "language": detected_language,
+            "model": "ggml-small.bin",
+            "filename": file.filename
+        }
+
     except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=408, detail="Transcription timeout")
+        raise HTTPException(status_code=408, detail="Transcription process timed out after 5 minutes.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+        # Tangkap semua error lain dan berikan detail
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
     finally:
-        # Clean up temporary file
+        # Selalu pastikan file temporer dihapus
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+        if os.path.exists(json_file_path):
+            os.remove(json_file_path)
