@@ -1,127 +1,50 @@
-import logging
-import os
-import subprocess
-import tempfile
-import json
-from fastapi import FastAPI, UploadFile, File, HTTPException
-import uvicorn
+FROM python:3.9-bullseye
 
-# --- Configuration ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Set environment variables for Python
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-# Define paths for the model and binary
-# These paths are set according to the Dockerfile
-MODEL_PATH = "/app/models/ggml-small.bin"
-WHISPER_BINARY_PATH = "/usr/local/bin/whisper"
+# Install all dependencies in one go: build tools and runtime tools
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        wget \
+        ca-certificates \
+        cmake \
+        ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
-app = FastAPI(
-    title="Whisper.cpp API",
-    description="A simple API to run transcriptions using whisper.cpp",
-    version="1.0.0"
-)
+# Set working directory
+WORKDIR /app
 
+# Clone whisper.cpp repository
+RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
-@app.get("/", tags=["General"])
-async def root():
-    """Root endpoint to check if the API is running."""
-    return {"message": "Whisper.cpp API is running. Use the /transcribe endpoint to process files."}
+# Build the main binary
+WORKDIR /app/whisper.cpp
+RUN cmake -B build -DWHISPER_CUDA=OFF -DCMAKE_CUDA_ARCHITECTURES=OFF
+RUN cmake --build build --config Release
 
+# Move back to the app directory
+WORKDIR /app
 
-@app.get("/health", tags=["General"])
-async def health_check():
-    """Check if the model and binary are available."""
-    is_model_ok = os.path.exists(MODEL_PATH)
-    is_binary_ok = os.path.exists(WHISPER_BINARY_PATH) and os.access(WHISPER_BINARY_PATH, os.X_OK)
+# Install Python libraries
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-    if is_model_ok and is_binary_ok:
-        return {"status": "healthy"}
-    
-    raise HTTPException(
-        status_code=503,
-        detail={
-            "status": "unhealthy",
-            "checks": {
-                "model_found": is_model_ok,
-                "binary_executable": is_binary_ok
-            }
-        }
-    )
+# Download the model
+RUN /app/whisper.cpp/models/download-ggml-model.sh small /app/models/
 
+# Copy the application file
+COPY main.py .
 
-@app.post("/transcribe", tags=["Transcription"])
-async def transcribe_audio(file: UploadFile = File(...)):
-    """
-    Transcribe an audio or video file.
-    The file is first converted to a standard WAV format before processing.
-    """
-    # Use a temporary directory to handle all files
-    with tempfile.TemporaryDirectory() as temp_dir:
-        original_filepath = os.path.join(temp_dir, file.filename)
-        
-        # Save uploaded file
-        with open(original_filepath, "wb") as f:
-            f.write(await file.read())
-            
-        # Standard WAV file path for whisper.cpp
-        wav_filepath = os.path.join(temp_dir, "input.wav")
+# Modify main.py to point to the correct binary path inside this unified image
+# The binary will be at /app/whisper.cpp/build/bin/main
+RUN sed -i 's|/usr/local/bin/whisper|/app/whisper.cpp/build/bin/main|g' main.py
 
-        # --- Step 1: Convert media to 16kHz mono WAV using FFmpeg ---
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", original_filepath,
-                    "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-                    wav_filepath
-                ],
-                check=True, capture_output=True, text=True, timeout=180
-            )
-        except subprocess.CalledProcessError as e:
-            logging.error(f"FFmpeg conversion failed: {e.stderr}")
-            raise HTTPException(status_code=400, detail=f"Audio conversion failed: {e.stderr}")
-        except subprocess.TimeoutExpired:
-            logging.error("FFmpeg conversion timed out.")
-            raise HTTPException(status_code=504, detail="Audio conversion timed out.")
+# Expose the port the app runs on
+EXPOSE 8000
 
-        # --- Step 2: Run Whisper.cpp transcription ---
-        json_output_base = os.path.join(temp_dir, "output")
-        
-        cmd = [
-            WHISPER_BINARY_PATH,
-            "-f", wav_filepath,
-            "-m", MODEL_PATH,
-            "-oj",  # Output in JSON format
-            "-of", json_output_base, # Output file name base
-            "-t", "auto", # Auto-detect threads
-            "-l", "auto", # Auto-detect language
-        ]
-
-        try:
-            logging.info(f"Executing whisper command: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1200) # 20 min timeout
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Whisper.cpp failed: {e.stderr}")
-            raise HTTPException(status_code=500, detail=f"Transcription failed: {e.stderr}")
-        except subprocess.TimeoutExpired:
-            logging.error("Whisper.cpp transcription timed out.")
-            raise HTTPException(status_code=504, detail="Transcription timed out.")
-
-        # --- Step 3: Read and return JSON output ---
-        json_filepath = json_output_base + ".json"
-        if not os.path.exists(json_filepath):
-            raise HTTPException(status_code=500, detail="Transcription finished but output file was not found.")
-
-        with open(json_filepath, 'r', encoding='utf-8') as f:
-            result = json.load(f)
-
-        # Combine text from all segments for convenience
-        full_text = " ".join(seg.get("text", "").strip() for seg in result.get("transcription", []))
-
-        return {
-            "language": result.get("language", {}).get("language", "unknown"),
-            "full_text": full_text,
-            "segments": result.get("transcription", [])
-        }
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# Run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
