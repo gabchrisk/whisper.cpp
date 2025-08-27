@@ -49,12 +49,13 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # 4. Install dependensi Python
-# Menyalin requirements.txt terlebih dahulu memanfaatkan Docker cache
+# Menyalin main.py terlebih dahulu memanfaatkan Docker cache
 COPY --chown=appuser:appuser main.py .
 RUN pip install --no-cache-dir fastapi uvicorn python-multipart
 
 # 5. Salin artefak yang dibutuhkan dari stage 'builder'
-COPY --from=builder /app/whisper.cpp/build/main /usr/local/bin/whisper
+# PERBAIKAN: Path yang benar adalah /app/whisper.cpp/build/bin/main
+COPY --from=builder /app/whisper.cpp/build/bin/main /usr/local/bin/whisper
 
 # 6. Download model dan salin kode aplikasi
 RUN mkdir -p /app/models && \
