@@ -1,7 +1,7 @@
 # Stage 1: Build the whisper.cpp binary
 FROM debian:bullseye-slim AS builder
 
-# Install build dependencies
+# Install build dependencies, including cmake and ca-certificates
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
@@ -25,8 +25,8 @@ RUN make
 FROM python:3.9-slim-bullseye
 
 # Set environment variables for Python
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # Install runtime dependencies (ffmpeg for audio conversion)
 RUN apt-get update && \
@@ -41,8 +41,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the compiled binary from the builder stage
-COPY --from=builder /app/whisper.cpp/main /usr/local/bin/whisper
+COPY --from=builder /app/whisper.cpp/build/main /usr/local/bin/whisper
 
 # Copy the model downloader script and run it
 # This keeps the model separate from the main application code
