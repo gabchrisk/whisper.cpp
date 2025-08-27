@@ -18,8 +18,10 @@ RUN git clone https://github.com/ggerganov/whisper.cpp.git
 
 WORKDIR /app/whisper.cpp
 
+# Build using cmake
 RUN cmake -B build
 RUN cmake --build build --config Release
+
 
 # Stage 2: Final production image
 FROM python:3.9-slim-bullseye
@@ -28,10 +30,10 @@ FROM python:3.9-slim-bullseye
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install runtime dependencies (ffmpeg for audio conversion)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ffmpeg && \
+        ffmpeg \
+        wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -41,10 +43,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy the compiled binary from the builder stage
 COPY --from=builder /app/whisper.cpp/build/bin/main /usr/local/bin/whisper
 
 # Copy the model downloader script and run it
-# This keeps the model separate from the main application code
 COPY --from=builder /app/whisper.cpp/models/download-ggml-model.sh /app/models/
 RUN /app/models/download-ggml-model.sh small /app/models/
 
