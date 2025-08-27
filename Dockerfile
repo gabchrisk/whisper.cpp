@@ -38,15 +38,17 @@ RUN cd whisper.cpp && \
     cmake .. -DWHISPER_FFMPEG=ON && \
     make -j$(nproc)
 
-# 4. Verify and create proper binary location
-# The build creates 'main' in build/ directory, not build/bin/
+# 4. Verify binary locations and create compatibility links
 RUN ls -la /app/whisper.cpp/build/ && \
-    if [ -f /app/whisper.cpp/build/bin/main ]; then \
-        ln -sf /app/whisper.cpp/build/bin/main /app/whisper.cpp/build/main; \
-    elif [ -f /app/whisper.cpp/build/main ]; then \
-        echo "Binary already in correct location"; \
+    ls -la /app/whisper.cpp/build/bin/ || echo "No bin directory" && \
+    # Newer versions use whisper-cli, older versions use main
+    if [ -f /app/whisper.cpp/build/bin/whisper-cli ]; then \
+        echo "Using new whisper-cli binary"; \
+        ln -sf /app/whisper.cpp/build/bin/whisper-cli /app/whisper.cpp/build/whisper-cli; \
+    elif [ -f /app/whisper.cpp/build/whisper-cli ]; then \
+        echo "whisper-cli already in build directory"; \
     else \
-        echo "ERROR: Binary not found in expected locations" && exit 1; \
+        echo "ERROR: whisper-cli binary not found" && exit 1; \
     fi
 
 # 5. Download the GGML model
@@ -54,7 +56,7 @@ RUN mkdir -p /app/models && \
     wget -O /app/models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 
 # 6. Test the binary works
-RUN /app/whisper.cpp/build/main --help || echo "Binary test failed but continuing..."
+RUN /app/whisper.cpp/build/whisper-cli --help || echo "Binary test failed but continuing..."
 
 # 7. Create virtual environment and install Python packages
 RUN python3 -m venv /opt/venv && \
