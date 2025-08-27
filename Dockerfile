@@ -25,16 +25,19 @@ RUN git clone https://github.com/ggerganov/whisper.cpp.git && \
 # =====================================================================
 # Stage 2: Final production image
 # =====================================================================
-FROM python:3.12-slim-bookworm
+# Use the same base image as the builder to ensure runtime compatibility
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 # Set PATH to include venv binaries
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install runtime dependencies (wget for downloading the model)
-RUN apt-get update && apt-get install -y --no-install-recommends wget && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# Install runtime dependencies (Python)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
